@@ -1,0 +1,21 @@
+# Python virtual environment directories
+venv/
+.venv/
+
+# Directories where Python dependencies are installed for Lambda deployment
+python/
+lambda_layer/ # If you used this name for a temporary layer directory
+
+# Compiled Python files and cache directories
+__pycache__/
+*.pyc
+
+# Operating System generated files
+.DS_Store # macOS specific
+
+# Editor specific files/directories (e.g., VS Code)
+.vscode/
+
+# Local development logs or temporary files you might create
+*.log
+*.tmp
