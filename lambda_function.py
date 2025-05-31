@@ -5,29 +5,47 @@ import re
 
 def lambda_handler(event, context):
     try:
-        if event['sessionState']['intent']['name'] == 'GetRutgersJobOpenings':
+        intent_name = event['sessionState']['intent']['name']
+        
+        if intent_name == 'GetRutgersJobOpenings':
             slots = event['sessionState']['intent']['slots']
             campus_slot = slots.get('campus')
+            keyword_slot = slots.get('keyword') # Ensure this matches your slot name in Lex if it's 'jobKeyword'
 
             campus_filter = None
-            if campus_slot and campus_slot['value'] and campus_slot['value']['interpretedValue']:
+            keyword_filter = None
+
+            if campus_slot and campus_slot.get('value') and campus_slot['value'].get('interpretedValue'):
                 campus_filter = campus_slot['value']['interpretedValue']
                 print(f"User requested campus filter: {campus_filter}")
 
-            # Pass the campus_filter to your scraping function
-            jobs_data = scrape_rutgers_jobs(campus=campus_filter) # Keep keyword=None for now
+            if keyword_slot and keyword_slot.get('value') and keyword_slot['value'].get('interpretedValue'):
+                keyword_filter = keyword_slot['value']['interpretedValue']
+                print(f"User requested keyword filter: {keyword_filter}")
+
+            # Pass both campus_filter and keyword_filter to your scraping function
+            jobs_data = scrape_rutgers_jobs(campus=campus_filter, keyword=keyword_filter)
 
             if jobs_data:
-                response_message = "Here are some of the latest Rutgers job openings:\n\n"
-                for job in jobs_data[:5]: # Still limiting to 5 for brevity
+                response_message = "Here are some of the latest Rutgers job openings"
+                if keyword_filter:
+                    response_message += f" for '{keyword_filter}'"
+                if campus_filter:
+                    response_message += f" in '{campus_filter}'"
+                response_message += ":\n"
+                for job in jobs_data[:5]:  # Limit to 5 for brevity
                     title = job.get('title', 'N/A')
                     department_campus = job.get('department_campus', 'N/A')
                     link = job.get('link', '#')
-                    response_message += f"\n\n* {title} ({department_campus}) - {link}\n"
-                response_message += "\nYou can visit https://jobs.rutgers.edu/ for more details.\n\n"
+                    response_message += f"\n* {title} ({department_campus}) - {link}"
+                response_message += "\n\nYou can visit https://jobs.rutgers.edu/ for more details."
             else:
-                if campus_filter:
-                    response_message = f"I couldn't find any job openings for '{campus_filter}' at Rutgers at the moment. Please try a different campus or search later.\n\n"
+                if keyword_filter and campus_filter:
+                    response_message = f"I couldn't find any job openings for '{keyword_filter}' in '{campus_filter}' at Rutgers at the moment. Please try a different keyword/campus or search later."
+                elif keyword_filter:
+                    response_message = f"I couldn't find any job openings for '{keyword_filter}' at Rutgers at the moment. Please try a different keyword or search later."
+                elif campus_filter:
+                    response_message = f"I couldn't find any job openings for '{campus_filter}' at Rutgers at the moment. Please try a different campus or search later."
                 else:
                     response_message = "I couldn't find any job openings at Rutgers at the moment. Please try again later."
 
@@ -49,8 +67,7 @@ def lambda_handler(event, context):
                 ]
             }
 
-        # ... (rest of your lambda_handler code for other intents remains unchanged) ...
-        elif event['sessionState']['intent']['name'] == 'GetWelcomeMessage':
+        elif intent_name == 'GetWelcomeMessage':
             return {
                 'sessionState': {
                     'dialogAction': {
@@ -64,11 +81,11 @@ def lambda_handler(event, context):
                 'messages': [
                     {
                         'contentType': 'PlainText',
-                        'content': 'Hello! Welcome to Rutgers University. I\'m your virtual campus guide. How can I assist you today regarding Rutgers job openings?'
+                        'content': "Hello! Welcome to Rutgers University. I'm your virtual campus guide. How can I assist you today regarding Rutgers job openings?"
                     }
                 ]
             }
-        elif event['sessionState']['intent']['name'] == 'SayGoodbye':
+        elif intent_name == 'SayGoodbye':
             return {
                 'sessionState': {
                     'dialogAction': {
@@ -82,7 +99,7 @@ def lambda_handler(event, context):
                 'messages': [
                     {
                         'contentType': 'PlainText',
-                        'content': 'You\'re welcome! I hope you consider joining the Rutgers community. Goodbye!'
+                        'content': "You're welcome! I hope you consider joining the Rutgers community. Goodbye!"
                     }
                 ]
             }
@@ -93,7 +110,7 @@ def lambda_handler(event, context):
                         'type': 'Close'
                     },
                     'intent': {
-                        'name': event['sessionState']['intent']['name'],
+                        'name': intent_name,
                         'state': 'Fulfilled'
                     }
                 },
@@ -125,9 +142,7 @@ def lambda_handler(event, context):
             ]
         }
 
-# Modified scrape_rutgers_jobs
-def scrape_rutgers_jobs(campus=None):
-    # UPDATED Mapping for campus names to their respective IDs on the Rutgers job board
+def scrape_rutgers_jobs(campus=None, keyword=None):
     campus_ids = {
         "New Brunswick": "3",
         "Newark": "1",
@@ -135,12 +150,15 @@ def scrape_rutgers_jobs(campus=None):
     }
 
     base_url = "https://jobs.rutgers.edu/postings/search"
-    params = {"sort": "435 asc"} # Default sort by latest
+    params = {"sort": "435 asc"}  # Default sort by latest
 
     if campus and campus in campus_ids:
-        # UPDATED: Use the new parameter name '2201[]'
         params["2201[]"] = campus_ids[campus]
         print(f"Applying campus filter for {campus} with ID {campus_ids[campus]}")
+
+    if keyword:
+        params["query"] = keyword
+        print(f"Applying keyword filter: {keyword}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -162,10 +180,14 @@ def scrape_rutgers_jobs(campus=None):
             department_campus_divs = job_item.select('div.col-md-8 div')
             department_campus = "N/A"
 
+            print(f"--- Processing Job: {title} ---") # Added for debugging
+            extracted_texts = [] # Added for debugging
+
             if department_campus_divs:
                 relevant_texts = []
-                for div in department_campus_divs:
+                for i, div in enumerate(department_campus_divs): # Added enumerate
                     text = div.get_text(strip=True)
+                    extracted_texts.append(f"Div {i}: '{text}'") # Added for debugging
                     if not re.fullmatch(r'\d{2}[A-Z]{2}\d{4}', text) and not text.isdigit():
                         if text:
                             relevant_texts.append(text)
@@ -173,6 +195,8 @@ def scrape_rutgers_jobs(campus=None):
                     department_campus = ", ".join(relevant_texts)
                 else:
                     department_campus = "N/A"
+            print(f"Raw extracted texts for department/campus: {extracted_texts}") # Added for debugging
+            print(f"Final department_campus value: {department_campus}") # Added for debugging
 
             jobs.append({
                 'title': title,
