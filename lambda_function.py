@@ -1,213 +1,196 @@
 import json
+import logging
+import os
 import requests
 from bs4 import BeautifulSoup
 import re
+import urllib.parse
 
-def lambda_handler(event, context):
+logger = logging.getLogger()
+logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO'))
+
+CAMPUS_IDS = {
+    "new brunswick": "3",
+    "newark": "1",
+    "camden": "2",
+}
+
+def get_campus_id(campus_name):
+    return CAMPUS_IDS.get(campus_name.lower())
+
+def scrape_rutgers_jobs(campus_id=None, keyword=None):
+    base_url = "https://jobs.rutgers.edu/postings/search"
+    
+    params = {
+        "utf8": "✓",
+        "query": keyword if keyword else "", 
+        "query_v0_posted_at_date": "",
+        "435": "",
+        "225": "",
+        "commit": "Search"
+    }
+
+    if campus_id:
+        params["2201[]"] = campus_id 
+    else:
+        params.pop("2201[]", None)
+            
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    }
+
+    encoded_params = urllib.parse.urlencode(params)
+    logger.info(f"Requesting URL: {base_url}?{encoded_params}")
+
     try:
-        intent_name = event['sessionState']['intent']['name']
-        
-        if intent_name == 'GetRutgersJobOpenings':
-            slots = event['sessionState']['intent']['slots']
-            campus_slot = slots.get('campus')
-            keyword_slot = slots.get('keyword') # Ensure this matches your slot name in Lex if it's 'jobKeyword'
+        response = requests.get(base_url, headers=headers, params=params, timeout=15)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"HTTP request failed: {e}")
+        return None
 
-            campus_filter = None
-            keyword_filter = None
+    logger.debug(f"--- RAW HTML RESPONSE (first 2000 chars, if available) ---\n{response.text[:2000]}\n--- END RAW HTML RESPONSE ---")
 
-            if campus_slot and campus_slot.get('value') and campus_slot['value'].get('interpretedValue'):
-                campus_filter = campus_slot['value']['interpretedValue']
-                print(f"User requested campus filter: {campus_filter}")
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    job_listings_raw = soup.select('div#search_results div.job-item.job-item-posting') 
+    
+    logger.info(f"Number of raw job_listings found by BeautifulSoup (after new selector): {len(job_listings_raw)}")
 
-            if keyword_slot and keyword_slot.get('value') and keyword_slot['value'].get('interpretedValue'):
-                keyword_filter = keyword_slot['value']['interpretedValue']
-                print(f"User requested keyword filter: {keyword_filter}")
+    jobs = []
+ 
 
-            # Pass both campus_filter and keyword_filter to your scraping function
-            jobs_data = scrape_rutgers_jobs(campus=campus_filter, keyword=keyword_filter)
+    for job_item in job_listings_raw: # Iterate over all raw listings
+        title_tag = job_item.select_one('div.job-title.col-md-4 h3 a')
+        title = title_tag.get_text(strip=True) if title_tag else "Untitled Job"
+        link = "https://jobs.rutgers.edu" + title_tag['href'] if title_tag and 'href' in title_tag.attrs else "#"
 
-            if jobs_data:
-                response_message = "Here are some of the latest Rutgers job openings"
-                if keyword_filter:
-                    response_message += f" for '{keyword_filter}'"
-                if campus_filter:
-                    response_message += f" in '{campus_filter}'"
-                response_message += ":\n"
-                for job in jobs_data[:5]:  # Limit to 5 for brevity
-                    title = job.get('title', 'N/A')
-                    department_campus = job.get('department_campus', 'N/A')
-                    link = job.get('link', '#')
-                    response_message += f"\n* {title} ({department_campus}) - {link}"
-                response_message += "\n\nYou can visit https://jobs.rutgers.edu/ for more details."
-            else:
-                if keyword_filter and campus_filter:
-                    response_message = f"I couldn't find any job openings for '{keyword_filter}' in '{campus_filter}' at Rutgers at the moment. Please try a different keyword/campus or search later."
-                elif keyword_filter:
-                    response_message = f"I couldn't find any job openings for '{keyword_filter}' at Rutgers at the moment. Please try a different keyword or search later."
-                elif campus_filter:
-                    response_message = f"I couldn't find any job openings for '{campus_filter}' at Rutgers at the moment. Please try a different campus or search later."
-                else:
-                    response_message = "I couldn't find any job openings at Rutgers at the moment. Please try again later."
+        department_campus_divs = job_item.select('div.col-md-8 div.tbody-cell.col-6')
+        department_campus_parts = []
+        for div in department_campus_divs:
+            text = div.get_text(strip=True)
+            if not re.fullmatch(r'(\d{2}[A-Z]{2}\d{4}|\d+)', text): 
+                if text:
+                    department_campus_parts.append(text)
+        department_campus = ", ".join(department_campus_parts) if department_campus_parts else "N/A"
 
-            return {
-                'sessionState': {
-                    'dialogAction': {
-                        'type': 'Close'
-                    },
-                    'intent': {
-                        'name': 'GetRutgersJobOpenings',
-                        'state': 'Fulfilled'
-                    }
-                },
-                'messages': [
-                    {
-                        'contentType': 'PlainText',
-                        'content': response_message
-                    }
-                ]
-            }
-
-        elif intent_name == 'GetWelcomeMessage':
-            return {
-                'sessionState': {
-                    'dialogAction': {
-                        'type': 'Close'
-                    },
-                    'intent': {
-                        'name': 'GetWelcomeMessage',
-                        'state': 'Fulfilled'
-                    }
-                },
-                'messages': [
-                    {
-                        'contentType': 'PlainText',
-                        'content': "Hello! Welcome to Rutgers University. I'm your virtual campus guide. How can I assist you today regarding Rutgers job openings?"
-                    }
-                ]
-            }
-        elif intent_name == 'SayGoodbye':
-            return {
-                'sessionState': {
-                    'dialogAction': {
-                        'type': 'Close'
-                    },
-                    'intent': {
-                        'name': 'SayGoodbye',
-                        'state': 'Fulfilled'
-                    }
-                },
-                'messages': [
-                    {
-                        'contentType': 'PlainText',
-                        'content': "You're welcome! I hope you consider joining the Rutgers community. Goodbye!"
-                    }
-                ]
-            }
-        else:
-            return {
-                'sessionState': {
-                    'dialogAction': {
-                        'type': 'Close'
-                    },
-                    'intent': {
-                        'name': intent_name,
-                        'state': 'Fulfilled'
-                    }
-                },
-                'messages': [
-                    {
-                        'contentType': 'PlainText',
-                        'content': "I'm sorry, I don't understand that request."
-                    }
-                ]
-            }
-
-    except Exception as e:
-        print(f"Error in lambda_handler: {e}")
-        return {
-            'sessionState': {
-                'dialogAction': {
-                    'type': 'Close'
-                },
-                'intent': {
-                    'name': event['sessionState']['intent']['name'],
-                    'state': 'Failed'
-                }
-            },
-            'messages': [
-                {
-                    'contentType': 'PlainText',
-                    'content': "An error occurred while trying to fetch job openings. Please try again later."
-                }
-            ]
+        job_data = {
+            'title': title,
+            'department_campus': department_campus,
+            'link': link
         }
 
-def scrape_rutgers_jobs(campus=None, keyword=None):
-    campus_ids = {
-        "New Brunswick": "3",
-        "Newark": "1",
-        "Camden": "2"
+        print(f"Scraped job (raw): Title='{job_data.get('title')}', Dept/Campus='{job_data.get('department_campus')}'")
+
+       
+    
+        jobs.append(job_data)
+
+    # Update log message
+    if keyword: # If a keyword was provided to the function (meaning the website should have filtered)
+        logger.info(f"Returning {len(jobs)} jobs based on website's keyword filter for '{keyword}'")
+    else: # If no keyword was provided, it's a general campus search
+        logger.info(f"Returning {len(jobs)} jobs for general search in '{get_campus_id(campus_id)}'")
+    
+    return jobs
+
+
+def lambda_handler(event, context):
+    logger.debug(f"Raw event: {json.dumps(event, indent=2)}")
+
+    response = {
+        "sessionState": {
+            "dialogAction": {
+                "type": "Close"
+            },
+            "intent": {
+                "name": event['sessionState']['intent']['name'],
+                "state": "Fulfilled"
+            }
+        },
+        "messages": []
     }
 
-    base_url = "https://jobs.rutgers.edu/postings/search"
-    params = {"sort": "435 asc"}  # Default sort by latest
+    slots = event['sessionState']['intent']['slots']
+    logger.debug(f"DEBUG: Raw slots object: {slots}")
 
-    if campus and campus in campus_ids:
-        params["2201[]"] = campus_ids[campus]
-        print(f"Applying campus filter for {campus} with ID {campus_ids[campus]}")
+    campus_slot = slots.get('campus')
+    logger.debug(f"DEBUG: Raw campus_slot: {campus_slot}")
 
-    if keyword:
-        params["query"] = keyword
-        print(f"Applying keyword filter: {keyword}")
+    keyword_slot = slots.get('keyword')
+    logger.debug(f"DEBUG: Raw keyword_slot: {keyword_slot}")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    campus_filter = None
+    if campus_slot and campus_slot['value']:
+        campus_filter = campus_slot['value']['interpretedValue']
+        logger.info(f"User requested campus filter: {campus_filter}")
+
+    keyword_filter = None
+    if keyword_slot and keyword_slot['value']:
+        keyword_filter = keyword_slot['value']['interpretedValue']
+        logger.info(f"User requested keyword filter (from interpretedValue): {keyword_filter}")
+    logger.debug(f"DEBUG: Final keyword_filter value: {keyword_filter}")
+
+    if not campus_filter:
+        response['sessionState']['dialogAction']['type'] = 'Delegate'
+        response['sessionState']['intent']['state'] = 'InProgress'
+        response['messages'].append({
+            "contentType": "PlainText",
+            "content": "Which campus are you interested in (e.g., New Brunswick, Newark, Camden)?"
+        })
+        return response
+
+    campus_id = get_campus_id(campus_filter)
+
+    if not campus_id:
+        response['messages'].append({
+            "contentType": "PlainText",
+            "content": f"I don't recognize '{campus_filter}' as a valid Rutgers campus. Please try a valid campus like New Brunswick, Newark, or Camden."
+        })
+        return response
+    
+    logger.info(f"Applying campus filter for {campus_filter} with ID {campus_id}")
 
     try:
-        response = requests.get(base_url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        if keyword_filter:
+            logger.info(f"Sending keyword to site: {keyword_filter}")
+            jobs = scrape_rutgers_jobs(campus_id=campus_id, keyword=keyword_filter)
+        else:
+            jobs = scrape_rutgers_jobs(campus_id=campus_id)
 
-        job_listings = soup.select('div#search_results div.job-item.job-item-posting')
-
-        jobs = []
-        for job_item in job_listings:
-            title_tag = job_item.select_one('div.job-title.col-md-4 h3 a')
-            title = title_tag.get_text(strip=True) if title_tag else "Untitled Job"
-            link = "https://jobs.rutgers.edu" + title_tag['href'] if title_tag and 'href' in title_tag.attrs else "#"
-
-            department_campus_divs = job_item.select('div.col-md-8 div')
-            department_campus = "N/A"
-
-            print(f"--- Processing Job: {title} ---") # Added for debugging
-            extracted_texts = [] # Added for debugging
-
-            if department_campus_divs:
-                relevant_texts = []
-                for i, div in enumerate(department_campus_divs): # Added enumerate
-                    text = div.get_text(strip=True)
-                    extracted_texts.append(f"Div {i}: '{text}'") # Added for debugging
-                    if not re.fullmatch(r'\d{2}[A-Z]{2}\d{4}', text) and not text.isdigit():
-                        if text:
-                            relevant_texts.append(text)
-                if relevant_texts:
-                    department_campus = ", ".join(relevant_texts)
-                else:
-                    department_campus = "N/A"
-            print(f"Raw extracted texts for department/campus: {extracted_texts}") # Added for debugging
-            print(f"Final department_campus value: {department_campus}") # Added for debugging
-
-            jobs.append({
-                'title': title,
-                'department_campus': department_campus,
-                'link': link
+        if jobs:
+            job_messages = []
+            for i, job in enumerate(jobs[:5]): # Limit to top 5 results
+                job_messages.append(f"* {job['title']} ({job['department_campus']}) - {job['link']}")
+            
+            job_list_text = "\n".join(job_messages)
+            response['messages'].append({
+                "contentType": "PlainText",
+                "content": f"Here are some of the latest Rutgers job openings in '{campus_filter}':\n{job_list_text}\nYou can visit https://jobs.rutgers.edu/ for more details."
             })
-        return jobs
+        else:
+            if keyword_filter:
+                response['messages'].append({
+                    "contentType": "PlainText",
+                    "content": f"I couldn't find any job openings for '{keyword_filter}' in '{campus_filter}' at Rutgers at the moment. Please try a different keyword/campus or search later."
+                })
+            else:
+                response['messages'].append({
+                    "contentType": "PlainText",
+                    "content": f"I couldn't find any job openings in '{campus_filter}' at Rutgers at the moment. Please try again later or check the official website."
+                })
 
     except requests.exceptions.RequestException as e:
-        print(f"Request error: {e}")
-        return None
+        logger.error(f"HTTP request failed: {e}")
+        response['messages'].append({
+            "contentType": "PlainText",
+            "content": "I'm sorry, I'm having trouble connecting to the job site right now. Please try again later."
+        })
     except Exception as e:
-        print(f"Scraping error: {e}")
-        return None
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        response['messages'].append({
+            "contentType": "PlainText",
+            "content": "An unexpected error occurred while fetching job openings. Please try again later."
+        })
+
+    return response
